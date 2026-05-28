@@ -246,6 +246,68 @@ layouts:
 
 `L` key opens a layout picker after pressing Enter on a new session.
 
+### ⚫ Multi-workspace sessions with agents
+> *inspiration: herdr (workspaces as a first-class grouping above panes/tabs), ATM (`atm layout pair/squad/grid`)*
+
+Today lazypilot treats every tmux session as an island — one project, one cwd, often one agent. After using herdr it's clear there's a missing layer: a **workspace** is a named grouping of related sessions/panes/agents that you flip between as a unit. For the worktree-+-agents workflow this maps directly onto: "the workspace for the `backend` repo, which today has 3 worktrees, 2 agents running, and a dev server."
+
+#### Concept
+
+A `workspace` in lazypilot is one entry that owns:
+
+- a **root project** (usually a git repo or repo-parent dir)
+- zero or more **worktrees** of that project, each with its own tmux session
+- zero or more **agents** assigned to specific panes inside those sessions
+- an associated **layout template** (editor + AI choice, or a multi-AI grid)
+
+```
+WORKSPACE: backend
+├── ◐ session  backend                     ← main checkout, claude streaming
+│   ├─ pane 0  nvim
+│   └─ pane 1  claude  (working)
+├── ! session  backend-lucky-otter         ← worktree, opencode needs input
+│   ├─ pane 0  nvim
+│   └─ pane 1  opencode  (needs input)
+└── ○ session  backend-nimble-falcon       ← worktree, claude idle on PR
+    ├─ pane 0  nvim
+    └─ pane 1  claude  (idle)
+```
+
+#### UX in lazypilot
+
+- A new top-level view `[0] Workspaces` (or push the existing 3 down to `2/3/4`) showing the workspace tree.
+- **Aggregated status** rolls up: a workspace shows the *most urgent* status across all its sessions (`!` if any pane needs input, `◐` if any is working, etc.).
+- **Switch workspaces with `prefix+W` (or `W` inside lazypilot)** — flips the entire context: tmux session list filter, the project root the wizard defaults to, the AI defaults that get pre-selected by the picker.
+- **Create workspace** from any repo/worktree row with `Shift+N` → asks for a name + initial layout (e.g. "editor + claude", "editor + claude + opencode", "editor only").
+- **Spawn worktree into existing workspace** with `n` (existing wizard) but the new worktree becomes a *child session* of the active workspace rather than a free-floating one.
+
+#### Persistence
+
+- Stored at `~/.config/lazypilot/workspaces.yaml`:
+  ```yaml
+  workspaces:
+    - name: backend
+      root: ~/Documents/diga/diga/backend
+      default_layout: { editor: nvim, ai: claude }
+      sessions:
+        - backend
+        - backend-lucky-otter
+        - backend-nimble-falcon
+    - name: dashboard
+      root: ~/Documents/diga/diga/dashboard
+      default_layout: { editor: nvim, ai: opencode }
+  ```
+- The daemon (Tier 1) keeps this file in sync as sessions are created/killed.
+- Worktrees auto-register into the workspace whose `root` is their source repo.
+
+#### Differentiators vs herdr
+
+- **Stays in tmux** — workspaces are just lazypilot's logical grouping over existing tmux sessions; tmux remains the multiplexer.
+- **Worktree-native** — workspaces understand that `backend-lucky-otter` is a worktree of `backend`, not a separate project. herdr treats them as siblings.
+- **Per-workspace AI defaults** — different projects, different agent preferences. Backend always gets claude; the design-system project always gets opencode. The picker remembers per workspace.
+
+This is a *big* feature — likely 2-3 evenings — but it's the natural endpoint of the current Sessions/Projects/Worktrees split. The three current views become **filters over the workspace tree** rather than independent things.
+
 ### ⚫ Mini-sidebar mode (inside an existing tmux session)
 > *inspiration: ATM (`atm workspace attach` — injects a sidebar into the current session)*
 

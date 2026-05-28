@@ -57,6 +57,18 @@ ai_processes:
   - aider
   - copilot
 
+# Editor launched in the LEFT pane when lazypilot creates a new tmux session.
+editor: nvim
+
+# AI assistants offered by the "pick AI" picker that fires whenever lazypilot
+# creates a new session. The selected AI runs in the RIGHT pane (60/40 split).
+# An empty `cmd` means "no AI pane — just the editor."
+ai_assistants:
+  - { name: claude,   cmd: claude }
+  - { name: opencode, cmd: opencode }
+  - { name: codex,    cmd: codex }
+  - { name: none,     cmd: "" }
+
 refresh_interval: 2s
 
 worktree_containers:

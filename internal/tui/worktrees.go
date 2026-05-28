@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os/exec"
 	"sort"
 	"strings"
 
@@ -174,6 +175,40 @@ func (w worktreesModel) renderDetail(width, height int) string {
 	return s.Panel(title, b.String(), width, height, false)
 }
 
+// renderPreview shows `git diff --stat` against the worktree's source repo.
+func (w worktreesModel) renderPreview(width, height int) string {
+	s := w.app.styles
+	title := "Diff"
+	items := w.filteredFlat()
+	if len(items) == 0 {
+		return s.Panel(title, "", width, height, false)
+	}
+	if w.cursor >= len(items) {
+		w.cursor = len(items) - 1
+	}
+	wt := items[w.cursor].Worktree
+
+	var b strings.Builder
+	b.WriteString(s.Heading.Render("▸ Diff (staged + unstaged)") + "\n")
+	stat, _ := exec.Command("git", "-C", wt.Path,
+		"-c", "color.ui=always",
+		"diff", "--stat", "HEAD").Output()
+	if len(stat) == 0 {
+		b.WriteString(s.Dim.Render("  (no changes)") + "\n")
+	} else {
+		b.WriteString(string(stat))
+	}
+
+	b.WriteString("\n" + s.Heading.Render("▸ Recent commits") + "\n")
+	out, _ := exec.Command("git", "-C", wt.Path,
+		"-c", "color.ui=always",
+		"log", "--oneline", "--decorate", fmt.Sprintf("-%d", height-10)).Output()
+	b.WriteString(string(out))
+
+	content := clipToBox(b.String(), width-4, height)
+	return s.Panel(title, content, width, height, false)
+}
+
 func (w worktreesModel) handleKey(m tea.KeyMsg, k keymap) (worktreesModel, tea.Cmd) {
 	if w.filter.active {
 		w.filter.Update(m)
@@ -197,10 +232,10 @@ func (w worktreesModel) handleKey(m tea.KeyMsg, k keymap) (worktreesModel, tea.C
 			path := items[w.cursor].Worktree.Path
 			return w, func() tea.Msg {
 				name := tmuxctl.SessionNameFor(path)
-				if !tmuxctl.HasSession(name) {
-					_ = tmuxctl.NewSession(name, path)
+				if tmuxctl.HasSession(name) {
+					return attachRequestMsg{name: name}
 				}
-				return attachRequestMsg{name: name}
+				return aiPickerMsg{target: name, dir: path}
 			}
 		}
 	case keyMatches(m, k.NewWT):

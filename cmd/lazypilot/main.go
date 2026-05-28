@@ -27,7 +27,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "lazypilot: opencode plugin install warning: %v\n", err)
 	}
 
-	app := tui.New(cfg.Roots)
+	app := tui.New(cfg)
 	p := tea.NewProgram(app, tea.WithAltScreen())
 
 	finalModel, err := p.Run()

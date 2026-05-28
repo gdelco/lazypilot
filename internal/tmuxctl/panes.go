@@ -73,11 +73,23 @@ func ListPanesIn(session string) ([]Pane, error) {
 	return out, nil
 }
 
-// CapturePane returns the last `lines` of visible content in the given pane,
-// as plain text (no escape sequences). Lines includes the cursor row.
+// CapturePane returns the full visible content of the given pane with ANSI
+// escape sequences preserved.
+//
+// We do NOT pass `-J` (join wrapped lines) or `-S/-E` (custom range):
+//
+//   - Full-screen TUIs (opencode, vim, htop) lay their UI out across the
+//     entire visible pane height. `-J` collapses each TUI row into a single
+//     joined line, destroying the layout.
+//   - `-S -N` slices off the bottom N rows of visible, which is wrong for
+//     a TUI whose interesting content sits at the TOP.
+//
+// `lines` is kept on the signature for symmetry with future plain-text
+// callers, but currently ignored — we always return the full visible region
+// and let the caller clip via clipToBox.
 func CapturePane(paneID string, lines int) (string, error) {
-	// -p print to stdout; -S -N start N lines back; -E -1 finish at last line; -J join wrapped lines.
-	out, err := tmux("capture-pane", "-p", "-t", paneID, "-S", "-"+strconv.Itoa(lines), "-E", "-1", "-J").Output()
+	_ = lines
+	out, err := tmux("capture-pane", "-p", "-e", "-t", paneID).Output()
 	if err != nil {
 		return "", err
 	}

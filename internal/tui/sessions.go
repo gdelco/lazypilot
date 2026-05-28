@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/gdelco/lazypilot/internal/detect"
 	"github.com/gdelco/lazypilot/internal/opencodehook"
@@ -14,13 +15,18 @@ import (
 )
 
 type sessionsModel struct {
-	app       *App
-	all       []tmuxctl.Session
-	panes     []paneStatus // flat list across all sessions, refreshed on tick
-	statusBy  map[string]detect.Status // session name → aggregated status
-	cursor    int
-	filter    filterState
-	aiList    []string // recognized AI process names, for IsAI matching
+	app      *App
+	all      []tmuxctl.Session
+	panes    []paneStatus // flat list across all sessions, refreshed on tick
+	statusBy map[string]detect.Status // session name → aggregated status
+	cursor   int
+	// paneCursor selects a pane within the currently selected session.
+	// Active only when paneFocus is true. j/k navigates this cursor instead
+	// of the session list, and Enter attaches to that specific pane.
+	paneCursor int
+	paneFocus  bool
+	filter     filterState
+	aiList     []string // recognized AI process names, for IsAI matching
 }
 
 // paneStatus is a tmux pane plus its classified AI status (StatusUnknown if not AI).
@@ -226,12 +232,19 @@ func (s sessionsModel) renderDetail(width, height int) string {
 
 	section := func(name string) string { return st.Heading.Render("▸ " + name) }
 
-	b.WriteString(section("Panes") + "\n")
+	heading := section("Panes")
+	if s.paneFocus {
+		heading += st.OK.Render(" ← focus (h/esc to exit)")
+	} else {
+		heading += st.Dim.Render("  (tab/l to focus)")
+	}
+	b.WriteString(heading + "\n")
+
 	panes := s.panesIn(sess.Name)
 	if len(panes) == 0 {
 		b.WriteString(st.Dim.Render("  (none)\n"))
 	}
-	for _, p := range panes {
+	for i, p := range panes {
 		marker := paneStatusIcon(p.Status, st)
 		label := fmt.Sprintf("%d.%d %s", p.WindowIndex, p.PaneIndex, p.Command)
 		suffix := ""
@@ -243,9 +256,92 @@ func (s sessionsModel) renderDetail(width, height int) string {
 		case detect.StatusIdle:
 			suffix = st.Dim.Render(" (idle)")
 		}
-		b.WriteString("  " + marker + " " + label + suffix + "\n")
+		row := marker + " " + label + suffix
+		if s.paneFocus && i == s.paneCursor {
+			row = st.ListSelected.Render("▶ " + row)
+		} else {
+			row = "  " + row
+		}
+		b.WriteString(row + "\n")
 	}
 	return st.Panel(title, b.String(), width, height, false)
+}
+
+// renderPreview returns a panel showing the live captured output of the
+// currently selected session's pane(s). Refreshes each detect tick.
+func (s sessionsModel) renderPreview(width, height int) string {
+	st := s.app.styles
+	items := s.filtered()
+	title := "Live preview"
+	if len(items) == 0 {
+		return st.Panel(title, "", width, height, false)
+	}
+	if s.cursor >= len(items) {
+		s.cursor = len(items) - 1
+	}
+	sess := items[s.cursor]
+
+	panes := s.panesIn(sess.Name)
+	if len(panes) == 0 {
+		return st.Panel(title, st.Dim.Render("\n  (no panes in this session)"), width, height, false)
+	}
+
+	// Pick the selected pane when in paneFocus mode, else default to first.
+	idx := 0
+	if s.paneFocus && s.paneCursor < len(panes) {
+		idx = s.paneCursor
+	}
+	p := panes[idx]
+
+	captureW := width - 4
+	if captureW < 20 {
+		captureW = 20
+	}
+	captureH := height - 2
+	if captureH < 5 {
+		captureH = 5
+	}
+
+	content, _ := tmuxctl.CapturePane(p.PaneID, captureH)
+	content = clipToBox(content, captureW, captureH)
+
+	title = fmt.Sprintf("Preview · %s [%d.%d %s]",
+		sess.Name, p.WindowIndex, p.PaneIndex, p.Command)
+	return st.Panel(title, content, width, height, false)
+}
+
+// clipToWidth truncates every line of `s` to at most `w` visible cells.
+// ANSI-aware: zero-width escape sequences (color codes from `git log
+// --color=always`, etc.) are preserved correctly, and we never cut a line
+// mid-escape — which was the bug behind "git tree gets buggy on big repos."
+func clipToWidth(s string, w int) string {
+	if w <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if lipgloss.Width(line) > w {
+			lines[i] = ansi.Truncate(line, w, "")
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// clipToBox truncates a multi-line string to at most `lines` lines AND at
+// most `width` visible cells per line. Use for preview content that must fit
+// in a fixed-size panel — without this, a very tall `git log --graph` blew
+// the layout because Panel rendered every line and lipgloss padded around it.
+func clipToBox(s string, width, lines int) string {
+	parts := strings.Split(s, "\n")
+	if lines > 0 && len(parts) > lines {
+		parts = parts[:lines]
+	}
+	for i, line := range parts {
+		if lipgloss.Width(line) > width {
+			parts[i] = ansi.Truncate(line, width, "")
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // statusMarker returns the aggregated status icon for the given session,
@@ -281,19 +377,67 @@ func (s sessionsModel) handleKey(m tea.KeyMsg, k keymap) (sessionsModel, tea.Cmd
 	if s.filter.active {
 		s.filter.Update(m)
 		s.cursor = 0
+		s.paneFocus = false
+		s.paneCursor = 0
 		return s, nil
 	}
 	items := s.filtered()
+
+	// Drill-in / drill-out keys come BEFORE the navigation switch so they
+	// take effect regardless of which sub-cursor has focus.
+	switch m.String() {
+	case "tab", "l", "right":
+		if !s.paneFocus && s.cursor < len(items) {
+			panes := s.panesIn(items[s.cursor].Name)
+			if len(panes) > 0 {
+				s.paneFocus = true
+				if s.paneCursor >= len(panes) {
+					s.paneCursor = 0
+				}
+				return s, nil
+			}
+		}
+	case "h", "left":
+		if s.paneFocus {
+			s.paneFocus = false
+			return s, nil
+		}
+	}
+
+	// j/k navigation: route to whichever cursor has focus.
+	if s.paneFocus {
+		panes := s.panesIn(items[s.cursor].Name)
+		switch {
+		case keyMatches(m, k.Up):
+			if s.paneCursor > 0 {
+				s.paneCursor--
+			}
+		case keyMatches(m, k.Down):
+			if s.paneCursor < len(panes)-1 {
+				s.paneCursor++
+			}
+		case keyMatches(m, k.Open):
+			if s.paneCursor < len(panes) {
+				p := panes[s.paneCursor]
+				target := fmt.Sprintf("%s:%d.%d", p.SessionName, p.WindowIndex, p.PaneIndex)
+				return s, func() tea.Msg { return attachRequestMsg{name: target} }
+			}
+		}
+		return s, nil
+	}
+
 	switch {
 	case keyMatches(m, k.Filter):
 		s.filter.Begin()
 	case keyMatches(m, k.Up):
 		if s.cursor > 0 {
 			s.cursor--
+			s.paneCursor = 0
 		}
 	case keyMatches(m, k.Down):
 		if s.cursor < len(items)-1 {
 			s.cursor++
+			s.paneCursor = 0
 		}
 	case keyMatches(m, k.Open):
 		if s.cursor < len(items) {

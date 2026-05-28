@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -134,6 +136,163 @@ func (p projectsModel) renderList(width, height int) string {
 	}
 
 	return s.Panel(title, strings.Join(rows, "\n"), width, height, true)
+}
+
+// renderPreview shows a recent-activity digest for the selected project:
+// branch / tracking state, a status summary (X staged, Y modified, Z
+// untracked), and the last few commits. For non-repo workspaces, a depth-2
+// file tree so you can see project structure at a glance.
+func (p projectsModel) renderPreview(width, height int) string {
+	s := p.app.styles
+	items := p.filtered()
+	title := "Activity"
+	if len(items) == 0 {
+		return s.Panel(title, "", width, height, false)
+	}
+	if p.cursor >= len(items) {
+		p.cursor = len(items) - 1
+	}
+	proj := items[p.cursor]
+
+	var b strings.Builder
+	if proj.Kind == scan.KindRepo || proj.Kind == scan.KindWorktree {
+		b.WriteString(s.Heading.Render("▸ Branch") + "\n")
+		b.WriteString("  " + gitBranch(proj.Path))
+		if track := gitTracking(proj.Path); track != "" {
+			b.WriteString("  " + s.Dim.Render(track))
+		}
+		b.WriteString("\n\n")
+
+		staged, modified, untracked := gitStatusCounts(proj.Path)
+		b.WriteString(s.Heading.Render("▸ Status") + "\n")
+		if staged+modified+untracked == 0 {
+			b.WriteString("  " + s.OK.Render("clean") + "\n")
+		} else {
+			b.WriteString(fmt.Sprintf("  %s staged · %s modified · %s untracked\n",
+				s.OK.Render(fmt.Sprintf("%d", staged)),
+				s.Warn.Render(fmt.Sprintf("%d", modified)),
+				s.Dim.Render(fmt.Sprintf("%d", untracked))))
+		}
+		b.WriteString("\n")
+
+		if n := gitStashCount(proj.Path); n > 0 {
+			b.WriteString(s.Heading.Render("▸ Stash") + fmt.Sprintf("  %d entries\n\n", n))
+		}
+
+		b.WriteString(s.Heading.Render("▸ Recent commits") + "\n")
+		out, _ := exec.Command("git", "-C", proj.Path,
+			"-c", "color.ui=always",
+			"log", "--pretty=format:  %C(auto)%h%Creset %s %C(dim)(%cr)%Creset", "-10").Output()
+		b.WriteString(string(out))
+	} else {
+		b.WriteString(s.Heading.Render("▸ Tree") + "\n")
+		b.WriteString(fileTree(proj.Path, 2, 20))
+	}
+
+	content := clipToBox(b.String(), width-4, height)
+	return s.Panel(title, content, width, height, false)
+}
+
+// gitTracking returns a compact string like "↑2 ↓1" (ahead/behind) when the
+// branch tracks a remote; empty when not tracking.
+func gitTracking(repo string) string {
+	out, err := exec.Command("git", "-C", repo, "rev-list", "--left-right", "--count", "HEAD...@{u}").Output()
+	if err != nil {
+		return ""
+	}
+	parts := strings.Fields(strings.TrimSpace(string(out)))
+	if len(parts) != 2 {
+		return ""
+	}
+	ahead, _ := strconv.Atoi(parts[0])
+	behind, _ := strconv.Atoi(parts[1])
+	if ahead == 0 && behind == 0 {
+		return "(in sync)"
+	}
+	pieces := []string{}
+	if ahead > 0 {
+		pieces = append(pieces, fmt.Sprintf("↑%d", ahead))
+	}
+	if behind > 0 {
+		pieces = append(pieces, fmt.Sprintf("↓%d", behind))
+	}
+	return strings.Join(pieces, " ")
+}
+
+// gitStatusCounts returns counts of (staged, modified-in-worktree, untracked).
+func gitStatusCounts(repo string) (staged, modified, untracked int) {
+	out, err := exec.Command("git", "-C", repo, "status", "--porcelain=v1").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if len(line) < 2 {
+			continue
+		}
+		x, y := line[0], line[1]
+		if x == '?' && y == '?' {
+			untracked++
+			continue
+		}
+		if x != ' ' && x != '?' {
+			staged++
+		}
+		if y != ' ' && y != '?' {
+			modified++
+		}
+	}
+	return
+}
+
+func gitStashCount(repo string) int {
+	out, err := exec.Command("git", "-C", repo, "stash", "list").Output()
+	if err != nil {
+		return 0
+	}
+	s := strings.TrimRight(string(out), "\n")
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
+}
+
+// fileTree renders a depth-limited directory listing of `root`.
+// Up to `maxEntriesPerDir` entries per level; hidden files skipped except .git.
+func fileTree(root string, maxDepth, maxEntriesPerDir int) string {
+	var b strings.Builder
+	var walk func(dir, prefix string, depth int)
+	walk = func(dir, prefix string, depth int) {
+		if depth > maxDepth {
+			return
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		count := 0
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			count++
+			if count > maxEntriesPerDir {
+				b.WriteString(prefix + "… (more)\n")
+				return
+			}
+			marker := "├── "
+			if count == len(entries) || count == maxEntriesPerDir {
+				marker = "└── "
+			}
+			b.WriteString(prefix + marker + e.Name() + "\n")
+			if e.IsDir() && depth < maxDepth {
+				next := prefix + "    "
+				walk(filepath.Join(dir, e.Name()), next, depth+1)
+			}
+		}
+	}
+	b.WriteString("  " + root + "\n")
+	walk(root, "  ", 1)
+	return b.String()
 }
 
 func (p projectsModel) iconFor(k scan.Kind) string {
@@ -305,13 +464,15 @@ func requestKillSession(name string) tea.Cmd {
 	}
 }
 
+// openCmd: if the tmux session already exists, attach. Otherwise pop the
+// AI picker so the user can decide how to lay out the new session.
 func (p projectsModel) openCmd(path string) tea.Cmd {
 	return func() tea.Msg {
 		name := tmuxctl.SessionNameFor(path)
-		if !tmuxctl.HasSession(name) {
-			_ = tmuxctl.NewSession(name, path)
+		if tmuxctl.HasSession(name) {
+			return attachRequestMsg{name: name}
 		}
-		return attachRequestMsg{name: name}
+		return aiPickerMsg{target: name, dir: path}
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/gdelco/lazypilot/internal/config"
 	"github.com/gdelco/lazypilot/internal/scan"
 	"github.com/gdelco/lazypilot/internal/tmuxctl"
 )
@@ -40,19 +41,22 @@ type Roots []string
 
 // App is the root bubbletea model.
 type App struct {
-	roots   Roots
-	home    string
-	view    view
-	width   int
-	height  int
-	keys    keymap
-	styles  styles
+	roots        Roots
+	home         string
+	editor       string
+	aiAssistants []config.AIAssistant
+	view         view
+	width        int
+	height       int
+	keys         keymap
+	styles       styles
 	projects  projectsModel
 	sessions  sessionsModel
 	worktrees worktreesModel
 	confirm   *confirmModal
 	wizard    *createWizard
 	help      *helpModal
+	aiPicker  *aiPickerModal
 	statusMsg string
 	// Action requested on Quit so main.go can run it after the TUI tears down
 	// (e.g. switching tmux client requires the TUI to give back the terminal first).
@@ -65,15 +69,20 @@ type deferredAction struct {
 }
 
 // New builds the root App model.
-func New(roots Roots) App {
+func New(cfg config.Config) App {
 	home, _ := os.UserHomeDir()
 	s := newStyles()
 	a := App{
-		roots:  roots,
-		home:   home,
-		keys:   newKeymap(),
-		styles: s,
-		view:   viewSessions, // start on Sessions — most useful when opening lazypilot mid-work
+		roots:        Roots(cfg.Roots),
+		home:         home,
+		editor:       cfg.Editor,
+		aiAssistants: cfg.AIAssistants,
+		keys:         newKeymap(),
+		styles:       s,
+		view:         viewSessions, // start on Sessions — most useful when opening lazypilot mid-work
+	}
+	if a.editor == "" {
+		a.editor = "nvim"
 	}
 	a.projects = newProjectsModel(&a)
 	a.sessions = newSessionsModel(&a)
@@ -140,20 +149,35 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return a, tea.Batch(cmds...)
 		}
+		if a.aiPicker != nil {
+			cmd, done := a.aiPicker.Update(m)
+			if done {
+				a.aiPicker = nil
+			}
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return a, tea.Batch(cmds...)
+		}
 
 		switch {
 		case keyMatches(m, a.keys.Quit):
 			return a, tea.Quit
 		case keyMatches(m, a.keys.View1):
 			a.view = viewSessions
+			cmds = append(cmds, a.sessions.refreshCmd(), a.sessions.detectCmd())
 		case keyMatches(m, a.keys.View2):
 			a.view = viewProjects
+			cmds = append(cmds, a.projects.scanCmd())
 		case keyMatches(m, a.keys.View3):
 			a.view = viewWorktrees
+			cmds = append(cmds, a.projects.scanCmd())
 		case keyMatches(m, a.keys.NextTab):
 			a.view = (a.view + 1) % 3
+			cmds = append(cmds, a.projects.scanCmd(), a.sessions.refreshCmd())
 		case keyMatches(m, a.keys.PrevTab):
 			a.view = (a.view + 2) % 3
+			cmds = append(cmds, a.projects.scanCmd(), a.sessions.refreshCmd())
 		case keyMatches(m, a.keys.Help):
 			a.help = newHelp()
 		case keyMatches(m, a.keys.Refresh):
@@ -182,6 +206,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.confirm = m.modal
 	case wizardMsg:
 		a.wizard = m.wizard
+	case aiPickerMsg:
+		a.aiPicker = newAIPicker(m.target, m.dir, a.editor, a.aiAssistants)
 	case rescanMsg:
 		cmds = append(cmds, a.projects.scanCmd(), a.sessions.refreshCmd(), a.sessions.detectCmd())
 		if m.status != "" {
@@ -190,8 +216,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case panesDetectedMsg:
 		a.sessions.applyDetect(m)
 	case detectTickMsg:
-		// Refresh sessions + AI status, then schedule the next tick.
-		cmds = append(cmds, a.sessions.refreshCmd(), a.sessions.detectCmd(), detectTickCmd(2*time.Second))
+		// Refresh EVERYTHING on every tick — sessions, AI status, AND the
+		// project scan that worktrees derive from. Without this last one,
+		// switching to the Projects or Worktrees tab showed data frozen at
+		// startup until the user manually pressed r.
+		cmds = append(cmds,
+			a.projects.scanCmd(),
+			a.sessions.refreshCmd(),
+			a.sessions.detectCmd(),
+			detectTickCmd(2*time.Second),
+		)
 	}
 
 	return a, tea.Batch(cmds...)
@@ -221,6 +255,9 @@ func (a App) View() string {
 	if a.help != nil {
 		return a.help.View(a.styles, a.width, a.height)
 	}
+	if a.aiPicker != nil {
+		return a.aiPicker.View(a.styles, a.width, a.height)
+	}
 	return base
 }
 
@@ -241,21 +278,86 @@ func (a App) renderTabs() string {
 }
 
 func (a App) renderBody() string {
-	// Title is embedded in the top border now, so each panel is bodyHeight + 2 rows
-	// (top border with title + content + bottom border).
-	// Total: tabs(1) + rule(1) + panel(bodyHeight+2) + footer(1) = a.height → bodyHeight = a.height - 5.
+	// Body content rows = a.height - tabs(1) - rule(1) - footer(1) - border-budget(2).
+	// Each panel uses Height(N) and renders N+2 rows (top+bottom border).
 	bodyHeight := a.height - 5
 	if bodyHeight < 5 {
 		bodyHeight = 5
 	}
 
+	// Narrow terminals fall back to the original 2-column (list | detail) layout.
+	if a.width < 110 {
+		return a.renderTwoPanel(a.width, bodyHeight)
+	}
+	return a.renderThreePanel(a.width, bodyHeight)
+}
+
+// renderTwoPanel: list left, detail right (the original layout).
+func (a App) renderTwoPanel(width, height int) string {
+	listW := width * 4 / 10
+	detailW := width - listW
 	switch a.view {
 	case viewSessions:
-		return a.sessions.view(a.width, bodyHeight)
+		return lipgloss.JoinHorizontal(lipgloss.Top,
+			a.sessions.renderList(listW, height),
+			a.sessions.renderDetail(detailW, height))
 	case viewProjects:
-		return a.projects.view(a.width, bodyHeight)
+		return lipgloss.JoinHorizontal(lipgloss.Top,
+			a.projects.renderList(listW, height),
+			a.projects.renderDetail(detailW, height))
 	case viewWorktrees:
-		return a.worktrees.view(a.width, bodyHeight)
+		return lipgloss.JoinHorizontal(lipgloss.Top,
+			a.worktrees.renderList(listW, height),
+			a.worktrees.renderDetail(detailW, height))
+	}
+	return ""
+}
+
+// renderThreePanel composes list+detail in a stacked left column with a
+// preview panel filling the right side.
+//
+//	╔══ LIST ════╗  ╔══ PREVIEW ════════╗
+//	║ ...        ║  ║                   ║
+//	╚════════════╝  ║                   ║
+//	╔══ DETAIL ══╗  ║                   ║
+//	║ ...        ║  ║                   ║
+//	╚════════════╝  ╚═══════════════════╝
+func (a App) renderThreePanel(width, height int) string {
+	leftW := width * 4 / 10
+	rightW := width - leftW
+	// Left column has two stacked panels — each contributes 2 border rows,
+	// so subtract 4 from the height budget before splitting content rows.
+	leftContent := height - 4
+	listH := leftContent * 6 / 10
+	detailH := leftContent - listH
+	if listH < 4 {
+		listH = 4
+	}
+	if detailH < 4 {
+		detailH = 4
+	}
+	// Preview is one panel — claims the full body height minus its 2 border rows.
+	previewH := height - 2
+
+	switch a.view {
+	case viewSessions:
+		list := a.sessions.renderList(leftW, listH)
+		detail := a.sessions.renderDetail(leftW, detailH)
+		preview := a.sessions.renderPreview(rightW, previewH)
+		left := lipgloss.JoinVertical(lipgloss.Left, list, detail)
+		return lipgloss.JoinHorizontal(lipgloss.Top, left, preview)
+	case viewProjects:
+		list := a.projects.renderList(leftW, listH)
+		detail := a.projects.renderDetail(leftW, detailH)
+		preview := a.projects.renderPreview(rightW, previewH)
+		left := lipgloss.JoinVertical(lipgloss.Left, list, detail)
+		return lipgloss.JoinHorizontal(lipgloss.Top, left, preview)
+	case viewWorktrees:
+		list := a.worktrees.renderList(leftW, listH)
+		detail := a.worktrees.renderDetail(leftW, detailH)
+		preview := a.worktrees.renderPreview(rightW, previewH)
+		left := lipgloss.JoinVertical(lipgloss.Left, list, detail)
+		return lipgloss.JoinHorizontal(lipgloss.Top, left, preview)
 	}
 	return ""
 }
@@ -348,6 +450,7 @@ type statusMsg string
 type attachRequestMsg struct{ name string }
 type confirmMsg struct{ modal *confirmModal }
 type wizardMsg struct{ wizard *createWizard }
+type aiPickerMsg struct{ target, dir string }
 type rescanMsg struct{ status string }
 type panesDetectedMsg []paneStatus
 type detectTickMsg time.Time

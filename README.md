@@ -72,6 +72,18 @@ ai_processes:
   - aider
   - copilot
 
+# Editor launched in the LEFT pane when lazypilot creates a new tmux session.
+editor: nvim
+
+# AI assistants offered by the "pick AI" picker that fires whenever you open
+# a new session via lazypilot. Each entry becomes the RIGHT pane in a 60/40
+# split next to the editor; an empty `cmd` means "no AI pane, just the editor."
+ai_assistants:
+  - { name: claude,   cmd: claude }
+  - { name: opencode, cmd: opencode }
+  - { name: codex,    cmd: codex }
+  - { name: none,     cmd: "" }
+
 # How often to poll tmux + AI status. The CPU/title checks are cheap, so 2s
 # is comfortable. Bump up for less flicker on big session counts.
 refresh_interval: 2s
@@ -136,6 +148,18 @@ lazypilot/
 │   └── config/                      # ~/.config/lazypilot/config.yaml loader
 └── install.sh
 ```
+
+## Roadmap
+
+Ideas next on deck, ranked by daily-leverage:
+
+1. **Desktop notifications when an agent flips to "needs input"** — `notify-send` on Linux / `osascript display notification` on macOS. Lets you run Claude / opencode in a background session and get pinged when one of them is blocked on you.
+2. **Stale-worktree cleanup** — list worktrees whose branch was merged or deleted on the remote; bulk-remove with `Shift-D`. Worktrees pile up fast.
+3. **Activity log on the Sessions tab** — subtle indicator next to a session name when it's received output since you last looked. Like an unread badge per session.
+4. **Quick git ops on a selected worktree** — `gp` pull, `gP` push, `gs` stash, `gc` commit. Save the trip into the worktree just to run them.
+5. **Persistent last-view** — open lazypilot on the tab + cursor position it was on when last closed.
+
+Open an issue or PR if you want to drive one of these.
 
 ## Acknowledgements
 

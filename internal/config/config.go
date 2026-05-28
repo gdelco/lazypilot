@@ -11,11 +11,20 @@ import (
 )
 
 type Config struct {
-	Roots              []string      `yaml:"roots"`
-	BranchPrefix       string        `yaml:"branch_prefix"`
-	AIProcesses        []string      `yaml:"ai_processes"`
-	RefreshInterval    time.Duration `yaml:"refresh_interval"`
-	WorktreeContainers []string      `yaml:"worktree_containers"`
+	Roots              []string       `yaml:"roots"`
+	BranchPrefix       string         `yaml:"branch_prefix"`
+	AIProcesses        []string       `yaml:"ai_processes"`
+	RefreshInterval    time.Duration  `yaml:"refresh_interval"`
+	WorktreeContainers []string       `yaml:"worktree_containers"`
+	AIAssistants       []AIAssistant  `yaml:"ai_assistants"`
+	Editor             string         `yaml:"editor"`
+}
+
+// AIAssistant is a launchable AI agent surfaced in the picker that fires
+// when a new tmux session is created. `none` is a sentinel for "no AI pane".
+type AIAssistant struct {
+	Name string `yaml:"name"` // display name in the picker
+	Cmd  string `yaml:"cmd"`  // shell command to launch; empty = no pane
 }
 
 // Defaults are used when no config file is present, or to fill in unset keys.
@@ -29,6 +38,13 @@ func Defaults() Config {
 			"{parent}/worktrees",
 			"{parent}/{repo}-worktrees",
 			"{parent}",
+		},
+		Editor: "nvim",
+		AIAssistants: []AIAssistant{
+			{Name: "claude", Cmd: "claude"},
+			{Name: "opencode", Cmd: "opencode"},
+			{Name: "codex", Cmd: "codex"},
+			{Name: "none", Cmd: ""},
 		},
 	}
 }

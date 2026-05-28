@@ -246,67 +246,90 @@ layouts:
 
 `L` key opens a layout picker after pressing Enter on a new session.
 
-### ⚫ Multi-workspace sessions with agents
-> *inspiration: herdr (workspaces as a first-class grouping above panes/tabs), ATM (`atm layout pair/squad/grid`)*
+### ⚫ Feature bundles — cross-project worktree sessions with shared-context agents
+> *inspiration: Cursor cloud agents (agents that span multiple repos to ship one feature)*
 
-Today lazypilot treats every tmux session as an island — one project, one cwd, often one agent. After using herdr it's clear there's a missing layer: a **workspace** is a named grouping of related sessions/panes/agents that you flip between as a unit. For the worktree-+-agents workflow this maps directly onto: "the workspace for the `backend` repo, which today has 3 worktrees, 2 agents running, and a dev server."
+The unit of work in real product engineering is rarely "one project." A single feature touches the **backend repo + frontend repo + docs + a shared design-system worktree** all at once. Today lazypilot opens those as separate tmux sessions and each Claude/opencode pane only knows about its own cwd — so the agent in the backend session can't see how the frontend already calls the new endpoint, and vice versa. You spend the day copy-pasting context between them.
+
+A **feature bundle** is a named tmux session that contains multiple worktrees from *different* repos, side by side, with a **single AI pane** that has filesystem-level context across all of them.
 
 #### Concept
 
-A `workspace` in lazypilot is one entry that owns:
-
-- a **root project** (usually a git repo or repo-parent dir)
-- zero or more **worktrees** of that project, each with its own tmux session
-- zero or more **agents** assigned to specific panes inside those sessions
-- an associated **layout template** (editor + AI choice, or a multi-AI grid)
-
 ```
-WORKSPACE: backend
-├── ◐ session  backend                     ← main checkout, claude streaming
-│   ├─ pane 0  nvim
-│   └─ pane 1  claude  (working)
-├── ! session  backend-lucky-otter         ← worktree, opencode needs input
-│   ├─ pane 0  nvim
-│   └─ pane 1  opencode  (needs input)
-└── ○ session  backend-nimble-falcon       ← worktree, claude idle on PR
-    ├─ pane 0  nvim
-    └─ pane 1  claude  (idle)
+FEATURE BUNDLE: integration-fix     (one tmux session)
+├── pane 0   nvim   in  ~/work/integration-fix/backend     (worktree of diga/backend)
+├── pane 1   nvim   in  ~/work/integration-fix/frontend    (worktree of diga/internal-dashboard)
+├── pane 2   nvim   in  ~/work/integration-fix/docs        (worktree of diga/docs)
+└── pane 3   claude  with cwd ~/work/integration-fix
+           ↑ sees all three worktrees as sibling directories, can grep / edit / run tests across them
 ```
+
+The agent's cwd is a **bundle root** that contains the worktrees as subdirectories (real dirs or symlinks). When the agent searches files, it searches the whole bundle. When it edits, it edits the right worktree based on path. When it runs tests, it can run them against any of them.
 
 #### UX in lazypilot
 
-- A new top-level view `[0] Workspaces` (or push the existing 3 down to `2/3/4`) showing the workspace tree.
-- **Aggregated status** rolls up: a workspace shows the *most urgent* status across all its sessions (`!` if any pane needs input, `◐` if any is working, etc.).
-- **Switch workspaces with `prefix+W` (or `W` inside lazypilot)** — flips the entire context: tmux session list filter, the project root the wizard defaults to, the AI defaults that get pre-selected by the picker.
-- **Create workspace** from any repo/worktree row with `Shift+N` → asks for a name + initial layout (e.g. "editor + claude", "editor + claude + opencode", "editor only").
-- **Spawn worktree into existing workspace** with `n` (existing wizard) but the new worktree becomes a *child session* of the active workspace rather than a free-floating one.
-
-#### Persistence
-
-- Stored at `~/.config/lazypilot/workspaces.yaml`:
-  ```yaml
-  workspaces:
-    - name: backend
-      root: ~/Documents/diga/diga/backend
-      default_layout: { editor: nvim, ai: claude }
-      sessions:
-        - backend
-        - backend-lucky-otter
-        - backend-nimble-falcon
-    - name: dashboard
-      root: ~/Documents/diga/diga/dashboard
-      default_layout: { editor: nvim, ai: opencode }
+- New action `B` (or `Ctrl-B` to avoid colliding with `b`) → opens the **bundle creator** modal:
   ```
-- The daemon (Tier 1) keeps this file in sync as sessions are created/killed.
-- Worktrees auto-register into the workspace whose `root` is their source repo.
+  ╔══ NEW FEATURE BUNDLE ══════════════════════════════╗
+  ║ Name:    integration-fix___________                ║
+  ║ Branch:  gdelco-pro-624-integration-fix_______     ║
+  ║                                                    ║
+  ║ Worktrees to include (space to toggle):            ║
+  ║   [x] backend           (from diga/backend)        ║
+  ║   [x] internal-dashboard (from diga/internal-dash) ║
+  ║   [x] docs              (from diga/docs)           ║
+  ║   [ ] activepieces      (from diga/activepieces)   ║
+  ║   [ ] Kanvas            (from diga/Kanvas)         ║
+  ║                                                    ║
+  ║ AI assistant: [claude] [opencode] [codex] [none]   ║
+  ╚════════════════════════════════════════════════════╝
+  ```
+- On confirm, lazypilot creates `~/work/<bundle-name>/` containing one git worktree per selected repo (using each repo's `git worktree add` with the same branch name), then opens a tmux session with one nvim pane per worktree + an AI pane rooted at the bundle dir.
+- Each pane's nvim has the worktree's own `.git`, so per-repo operations (commit, push, PR) work normally inside that pane.
+- The AI pane sees `backend/`, `frontend/`, `docs/` as siblings — context is the union of all three trees, like Cursor cloud's multi-repo sandbox.
 
-#### Differentiators vs herdr
+#### Configuration
 
-- **Stays in tmux** — workspaces are just lazypilot's logical grouping over existing tmux sessions; tmux remains the multiplexer.
-- **Worktree-native** — workspaces understand that `backend-lucky-otter` is a worktree of `backend`, not a separate project. herdr treats them as siblings.
-- **Per-workspace AI defaults** — different projects, different agent preferences. Backend always gets claude; the design-system project always gets opencode. The picker remembers per workspace.
+```yaml
+# ~/.config/lazypilot/config.yaml
+bundles:
+  root: ~/work                       # where bundle directories live
+  default_layout: tile               # tile / vertical-strip / focused (one big + sidebar of others)
+  default_branch_prefix: ""          # honors TMUX_SESSIONIZER_BRANCH_PREFIX too
+  symlink_worktrees: false           # true = symlink each worktree into the bundle; false = git worktree add directly
+  shared_files:                      # optional symlinks into the bundle root so the agent has them
+    - ~/.claude/claude.md
+    - ~/.config/lazypilot/AGENTS.md  # bundle-level instructions the agent loads on start
+```
 
-This is a *big* feature — likely 2-3 evenings — but it's the natural endpoint of the current Sessions/Projects/Worktrees split. The three current views become **filters over the workspace tree** rather than independent things.
+#### Lifecycle
+
+| Action | What lazypilot does |
+|---|---|
+| **Create bundle** | One `git worktree add` per included repo (same branch name across repos) under `<root>/<bundle>/<repo>` + tmux session with grid/strip layout + AI pane cwd'd at `<root>/<bundle>/` |
+| **Attach** | `enter` on a bundle row attaches to its tmux session like any other |
+| **Add worktree** | Adds another repo's worktree into the same bundle dir, opens a new pane for it without restarting the agent |
+| **Close** | Confirmation → kills tmux session → optionally runs `git worktree remove` per included repo (only if clean) |
+
+#### Why this is different from cursor cloud
+
+- **Runs locally** — no sandbox, no upload, no cloud pricing. Just `git worktree add` + tmux.
+- **Your real environment** — your terminal, your shell rc, your nvim config, your MCP servers, your secrets file. Cursor's cloud agents can't see any of that.
+- **You can interrupt anytime** — focus the nvim pane and edit. The agent picks up the change.
+- **Cheap to throw away** — `git worktree remove` is fast; bundles aren't sacred.
+
+#### Differentiators vs herdr / ATM
+
+- herdr's "workspaces" are single-project. Bundles are multi-project, organized around a *feature* rather than a *codebase*.
+- ATM's "layout pair/squad/grid" arrange multiple agents in panes — bundles arrange multiple *worktrees* and (usually) just one agent.
+
+#### Open questions before building
+
+- **Symlinks vs real worktrees:** symlinks are faster to create but break agents that need real `.git` resolution. `git worktree add` is heavier but is the safer default.
+- **Branch-name correlation across repos:** require all included worktrees to share a branch name? Or allow per-repo branch picks at creation?
+- **Cleanup policy:** auto-prune bundles whose all branches are merged? Or leave them indefinitely?
+
+This is the natural progression of the lazypilot worktree wizard: from "one worktree of one repo" → "one bundle of worktrees across many repos, sharing context with one agent."
 
 ### ⚫ Mini-sidebar mode (inside an existing tmux session)
 > *inspiration: ATM (`atm workspace attach` — injects a sidebar into the current session)*

@@ -151,13 +151,14 @@ lazypilot/
 
 ## Roadmap
 
-Ideas next on deck, ranked by daily-leverage:
+A full feature roadmap lives in **[`docs/ROADMAP.md`](docs/ROADMAP.md)** — categorized by impact, with attribution to ideas borrowed from [ATM](https://github.com/damelLP/agent-tmux-manager) and [herdr](https://github.com/ogulcancelik/herdr).
 
-1. **Desktop notifications when an agent flips to "needs input"** — `notify-send` on Linux / `osascript display notification` on macOS. Lets you run Claude / opencode in a background session and get pinged when one of them is blocked on you.
-2. **Stale-worktree cleanup** — list worktrees whose branch was merged or deleted on the remote; bulk-remove with `Shift-D`. Worktrees pile up fast.
-3. **Activity log on the Sessions tab** — subtle indicator next to a session name when it's received output since you last looked. Like an unread badge per session.
-4. **Quick git ops on a selected worktree** — `gp` pull, `gP` push, `gs` stash, `gc` commit. Save the trip into the worktree just to run them.
-5. **Persistent last-view** — open lazypilot on the tab + cursor position it was on when last closed.
+Top of the queue:
+
+1. **Daemon (`lazypilotd`) + tmux status-bar integration + desktop notifications** — so you find out an agent is waiting on you *without* opening lazypilot.
+2. **CLI subcommands** (`lazypilot list / status / send / reply`) — scripting + tmux-status-right embedding.
+3. **Stale-worktree cleanup** + activity log on Sessions.
+4. **Context / cost tracking** from Claude Code's local `~/.claude/projects/**/*.jsonl` logs.
 
 Open an issue or PR if you want to drive one of these.
 

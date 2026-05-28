@@ -19,6 +19,7 @@ type keymap struct {
 	Remove     key.Binding
 	KillSesh   key.Binding
 	Refresh    key.Binding
+	Filter     key.Binding
 	Help       key.Binding
 	Quit       key.Binding
 }
@@ -41,6 +42,7 @@ func newKeymap() keymap {
 		Remove:   key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "remove")),
 		KillSesh: key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "kill session")),
 		Refresh:  key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+		Filter:   key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:     key.NewBinding(key.WithKeys("q", "esc", "ctrl+c"), key.WithHelp("q", "quit")),
 	}

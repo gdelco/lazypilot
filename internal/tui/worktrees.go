@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -17,6 +18,20 @@ type worktreesModel struct {
 	groups []worktreeGroup
 	flat   []worktreeEntry // flattened for cursor navigation (only worktree rows)
 	cursor int
+	filter filterState
+}
+
+func (w worktreesModel) filteredFlat() []worktreeEntry {
+	if w.filter.text == "" {
+		return w.flat
+	}
+	out := []worktreeEntry{}
+	for _, e := range w.flat {
+		if w.filter.Matches(e.Worktree.Path) || w.filter.Matches(e.Worktree.SourceRepo) {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 type worktreeGroup struct {
@@ -79,74 +94,129 @@ func (w worktreesModel) view(width, height int) string {
 
 func (w worktreesModel) renderList(width, height int) string {
 	s := w.app.styles
-	border := s.Border.Width(width).Height(height)
+	filtered := w.filteredFlat()
+	title := fmt.Sprintf("Worktrees (%d/%d)", len(filtered), len(w.flat))
 	if len(w.groups) == 0 {
-		return border.Render(s.Dim.Render("\n  no worktrees found. Press n on a repo to create one."))
+		return s.Panel(title, s.Dim.Render("\n  no worktrees found. Press n on a repo to create one."), width, height, true)
 	}
 
+	// When filtering, render a flat list. Without filter, render grouped.
 	var rows []string
-	flatIdx := 0
-	for _, g := range w.groups {
-		rows = append(rows, s.Heading.Render(displayPath(g.SourceRepo, w.app.home)))
-		for _, wt := range g.Worktrees {
-			label := "  " + s.IconWorktree.Render(scan.KindWorktree.Icon()) + " " + displayPath(wt.Path, w.app.home)
-			if flatIdx == w.cursor {
-				label = s.ListSelected.Render(label)
+	if w.filter.text != "" {
+		if w.cursor >= len(filtered) {
+			w.cursor = max(0, len(filtered)-1)
+		}
+		for i, e := range filtered {
+			label := s.IconWorktree.Render(scan.KindWorktree.Icon()) + " " + displayPath(e.Worktree.Path, w.app.home)
+			row := s.Cursor(i == w.cursor)
+			if i == w.cursor {
+				row += s.ListSelected.Render(label)
 			} else {
-				label = s.ListItem.Render(label)
+				row += s.ListItem.Render(label)
 			}
-			rows = append(rows, label)
-			flatIdx++
+			rows = append(rows, row)
+		}
+	} else {
+		flatIdx := 0
+		for _, g := range w.groups {
+			rows = append(rows, s.Dim.Render("  "+displayPath(g.SourceRepo, w.app.home)))
+			for _, wt := range g.Worktrees {
+				label := s.IconWorktree.Render(scan.KindWorktree.Icon()) + " " + displayPath(wt.Path, w.app.home)
+				row := s.Cursor(flatIdx == w.cursor)
+				if flatIdx == w.cursor {
+					row += s.ListSelected.Render(label)
+				} else {
+					row += s.ListItem.Render(label)
+				}
+				rows = append(rows, row)
+				flatIdx++
+			}
 		}
 	}
 
-	visible := height - 2
+	filterBar := w.filter.Render(s)
+	visible := height
+	if filterBar != "" {
+		visible--
+	}
 	if visible > 0 && len(rows) > visible {
 		rows = rows[:visible]
 	}
-	return border.Render(strings.Join(rows, "\n"))
+	if filterBar != "" {
+		rows = append(rows, filterBar)
+	}
+	return s.Panel(title, strings.Join(rows, "\n"), width, height, true)
 }
 
 func (w worktreesModel) renderDetail(width, height int) string {
 	s := w.app.styles
-	border := s.Border.Width(width).Height(height)
-	if len(w.flat) == 0 {
-		return border.Render("")
+	title := "Details"
+	items := w.filteredFlat()
+	if len(items) == 0 {
+		return s.Panel(title, "", width, height, false)
 	}
-	wt := w.flat[w.cursor].Worktree
+	if w.cursor >= len(items) {
+		w.cursor = len(items) - 1
+	}
+	wt := items[w.cursor].Worktree
+	section := func(name string) string { return s.Heading.Render("▸ " + name) }
 	var b strings.Builder
 	b.WriteString(s.Heading.Render(wt.Path) + "\n\n")
-	b.WriteString(s.Heading.Render("Source repo") + ": " + wt.SourceRepo + "\n")
-	b.WriteString(s.Heading.Render("Branch") + ": " + gitBranch(wt.Path) + "\n\n")
-	b.WriteString(s.Heading.Render("Status") + ":\n")
+	b.WriteString(section("Source repo") + "  " + wt.SourceRepo + "\n")
+	b.WriteString(section("Branch") + "  " + gitBranch(wt.Path) + "\n\n")
+	b.WriteString(section("Status") + "\n")
 	st := gitStatus(wt.Path)
 	if st == "" {
 		b.WriteString("  " + s.OK.Render("(clean)") + "\n")
 	} else {
 		b.WriteString(st)
 	}
-	return border.Render(b.String())
+	return s.Panel(title, b.String(), width, height, false)
 }
 
 func (w worktreesModel) handleKey(m tea.KeyMsg, k keymap) (worktreesModel, tea.Cmd) {
+	if w.filter.active {
+		w.filter.Update(m)
+		w.cursor = 0
+		return w, nil
+	}
+	items := w.filteredFlat()
 	switch {
+	case keyMatches(m, k.Filter):
+		w.filter.Begin()
 	case keyMatches(m, k.Up):
 		if w.cursor > 0 {
 			w.cursor--
 		}
 	case keyMatches(m, k.Down):
-		if w.cursor < len(w.flat)-1 {
+		if w.cursor < len(items)-1 {
 			w.cursor++
 		}
 	case keyMatches(m, k.Open):
-		if w.cursor < len(w.flat) {
-			path := w.flat[w.cursor].Worktree.Path
+		if w.cursor < len(items) {
+			path := items[w.cursor].Worktree.Path
 			return w, func() tea.Msg {
 				name := tmuxctl.SessionNameFor(path)
 				if !tmuxctl.HasSession(name) {
 					_ = tmuxctl.NewSession(name, path)
 				}
 				return attachRequestMsg{name: name}
+			}
+		}
+	case keyMatches(m, k.NewWT):
+		if w.cursor < len(items) {
+			return w, requestCreateWorktree(items[w.cursor].Worktree.Path)
+		}
+	case keyMatches(m, k.Remove):
+		if w.cursor < len(items) {
+			return w, requestRemoveWorktree(items[w.cursor].Worktree.Path)
+		}
+	case keyMatches(m, k.KillSesh):
+		if w.cursor < len(items) {
+			path := items[w.cursor].Worktree.Path
+			name := tmuxctl.SessionNameFor(path)
+			if tmuxctl.HasSession(name) {
+				return w, requestKillSession(name)
 			}
 		}
 	}

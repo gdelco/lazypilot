@@ -14,6 +14,7 @@ type Pane struct {
 	Command     string // pane_current_command
 	PID         int
 	PaneID      string // e.g. "%17"
+	Title       string // pane_title — terminal title set via OSC escape sequence by the agent
 }
 
 // Label returns a display name like "1.0  claude".
@@ -27,7 +28,7 @@ func (p Pane) Label() string {
 // ListPanes returns every pane across every tmux session.
 func ListPanes() ([]Pane, error) {
 	out, err := tmux("list-panes", "-a",
-		"-F", "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_current_command}\t#{pane_pid}\t#{pane_id}").Output()
+		"-F", "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_current_command}\t#{pane_pid}\t#{pane_id}\t#{pane_title}").Output()
 	if err != nil {
 		if isNoServer(err) {
 			return nil, nil
@@ -38,7 +39,7 @@ func ListPanes() ([]Pane, error) {
 	var panes []Pane
 	for _, line := range splitLines(string(out)) {
 		f := strings.Split(line, "\t")
-		if len(f) < 6 {
+		if len(f) < 7 {
 			continue
 		}
 		wi, _ := strconv.Atoi(f[1])
@@ -51,6 +52,7 @@ func ListPanes() ([]Pane, error) {
 			Command:     f[3],
 			PID:         pid,
 			PaneID:      f[5],
+			Title:       f[6],
 		})
 	}
 	return panes, nil

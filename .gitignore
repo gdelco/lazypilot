@@ -1,0 +1,10 @@
+# Built binaries
+/lazypilot
+/dist/
+
+# Test scratch
+/coverage.out
+
+# Editor cruft
+.vscode/
+.idea/
